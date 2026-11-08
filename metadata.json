@@ -1,0 +1,6 @@
+{
+  "name": "Midnight Confessions: The Case Of Dr Black",
+  "description": "Interactive companion app and investigation tracker for Midnight Confessions: The Case Of Dr Black.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
