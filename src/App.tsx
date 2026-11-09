@@ -31,6 +31,7 @@ import {
 } from 'lucide-react';
 import { NoirSpotPortrait, NoirSpotLockedChamber, NoirSpotStaff } from './components/NoirSpotIllustrations';
 import { ClassicSuspectPortrait } from './components/ClassicSuspectPortrait';
+import { Html5Qrcode } from 'html5-qrcode';
 
 // Declarations for global scripts loaded via CDN
 declare global {
@@ -592,6 +593,11 @@ export default function App() {
   // Gear & abilities
   const [hasSabotageTrap, setHasSabotageTrap] = useState(false);
   const [hasPoliceTape, setHasPoliceTape] = useState(false);
+  const [hasTorchlight, setHasTorchlight] = useState(false);
+  const [hasLadder, setHasLadder] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [isCameraActive, setIsCameraActive] = useState(false);
+  const scannerRef = useRef<Html5Qrcode | null>(null);
   const [sabotageTrapRoom, setSabotageTrapRoom] = useState<string | null>(null);
   const [policeTapeRoom, setPoliceTapeRoom] = useState<string | null>(null);
   const [pendingJudgeReport, setPendingJudgeReport] = useState<{
@@ -1019,18 +1025,31 @@ export default function App() {
         })
         .catch(() => {});
 
-      const loc = localStorage.getItem('myStartLoc_' + seed) || 'ENTRANCE HALL';
+      const lockedChamber = localStorage.getItem('lockedRoom_' + seed) || 'CELLAR';
+      const invalidStarts = [lockedChamber, 'ATTIC', 'CELLAR', 'STORAGE ROOM', 'HALLWAY', 'STAIRCASE'];
+
+      let loc = localStorage.getItem('myStartLoc_' + seed) || 'ENTRANCE HALL';
+      if (invalidStarts.includes(loc)) {
+        loc = 'ENTRANCE HALL';
+        localStorage.setItem('myStartLoc_' + seed, loc);
+      }
       setPlayerLocation(loc);
 
       const logs = JSON.parse(localStorage.getItem('caseLog_' + seed) || '[]');
       setNotebookLogs(logs);
 
       const gear = JSON.parse(localStorage.getItem('purchasedGear_' + seed) || '{}');
-      setHasSabotageTrap(!!gear.sabotage);
-      setHasPoliceTape(!!gear.tape);
+      setHasSabotageTrap(!!gear.sabotage || localStorage.getItem('hasSabotageTrap_' + seed) === 'true');
+      setHasPoliceTape(!!gear.tape || localStorage.getItem('hasPoliceTape_' + seed) === 'true');
+      setHasTorchlight(localStorage.getItem('hasTorchlight_' + seed) === 'true');
+      setHasLadder(localStorage.getItem('hasLadder_' + seed) === 'true');
 
       const ai = JSON.parse(localStorage.getItem('aiStats_' + seed) || '{}');
-      const currentAILoc = localStorage.getItem('aiLoc_' + seed) || 'LIBRARY';
+      let currentAILoc = localStorage.getItem('aiLoc_' + seed) || 'LIBRARY';
+      if (invalidStarts.includes(currentAILoc) || currentAILoc === loc) {
+        currentAILoc = loc === 'LIBRARY' ? 'LOUNGE' : 'LIBRARY';
+        localStorage.setItem('aiLoc_' + seed, currentAILoc);
+      }
       setAiStats({ ...ai, loc: currentAILoc });
 
       setActiveView('view-main');
@@ -1038,6 +1057,114 @@ export default function App() {
       setActiveView('view-start');
     }
   };
+
+  // --- CAMERA OPTICAL QR SCANNER LIFECYCLE ---
+  useEffect(() => {
+    let isMounted = true;
+
+    if (!modalScanner) {
+      if (scannerRef.current) {
+        const activeQr = scannerRef.current;
+        scannerRef.current = null;
+        if (activeQr.isScanning) {
+          activeQr
+            .stop()
+            .catch(() => {})
+            .finally(() => {
+              try {
+                activeQr.clear();
+              } catch (e) {}
+            });
+        } else {
+          try {
+            activeQr.clear();
+          } catch (e) {}
+        }
+      }
+      setIsCameraActive(false);
+      setCameraError(null);
+      return;
+    }
+
+    setCameraError(null);
+    setIsCameraActive(false);
+
+    const timer = setTimeout(async () => {
+      if (!isMounted) return;
+      const readerElem = document.getElementById('reader');
+      if (!readerElem) return;
+
+      try {
+        const qr = new Html5Qrcode('reader');
+        scannerRef.current = qr;
+
+        await qr.start(
+          { facingMode: 'environment' },
+          {
+            fps: 10,
+            qrbox: { width: 220, height: 220 },
+          },
+          (decodedText: string) => {
+            playDing();
+            setModalScanner(false);
+            handleProcessScannedCode(decodedText);
+          },
+          () => {
+            // frame scanning error callback (silent)
+          }
+        );
+
+        if (isMounted) {
+          setIsCameraActive(true);
+        } else {
+          if (qr.isScanning) {
+            qr.stop().catch(() => {}).finally(() => {
+              try {
+                qr.clear();
+              } catch (e) {}
+            });
+          } else {
+            try {
+              qr.clear();
+            } catch (e) {}
+          }
+        }
+      } catch (err: any) {
+        console.warn('Camera initialization error:', err);
+        if (isMounted) {
+          setCameraError(
+            err?.message ||
+              'Camera stream unavailable. Please verify browser permissions or use the quick search button / manual entry below.'
+          );
+          setIsCameraActive(false);
+        }
+      }
+    }, 250);
+
+    return () => {
+      isMounted = false;
+      clearTimeout(timer);
+      if (scannerRef.current) {
+        const activeQr = scannerRef.current;
+        scannerRef.current = null;
+        if (activeQr.isScanning) {
+          activeQr
+            .stop()
+            .catch(() => {})
+            .finally(() => {
+              try {
+                activeQr.clear();
+              } catch (e) {}
+            });
+        } else {
+          try {
+            activeQr.clear();
+          } catch (e) {}
+        }
+      }
+      setIsCameraActive(false);
+    };
+  }, [modalScanner]);
 
   // --- INITIALIZE MYSTERY WITH 12 REAL SUSPECTS & INITIAL POSITIONING ---
   const initMysteryState = (seed: string) => {
@@ -1340,18 +1467,21 @@ export default function App() {
     const savedSearched = JSON.parse(localStorage.getItem('searchedItemRooms_' + seed) || '[]');
     setSearchedItemRooms(savedSearched);
 
+    const invalidStarts = [lockedRoom, 'ATTIC', 'CELLAR', 'STORAGE ROOM', 'HALLWAY', 'STAIRCASE'];
+    const validStarts = allRooms.filter(r => !invalidStarts.includes(r));
+
     let startLoc = localStorage.getItem('myStartLoc_' + seed);
-    if (!startLoc && allRooms.length > 0) {
-      const validStarts = allRooms.filter(r => r !== lockedRoom && r !== 'ATTIC' && r !== 'CELLAR' && r !== 'STORAGE ROOM');
+    if (!startLoc || invalidStarts.includes(startLoc)) {
       startLoc = validStarts[Math.floor(setupRng() * validStarts.length)] || 'ENTRANCE HALL';
       localStorage.setItem('myStartLoc_' + seed, startLoc);
-
-      const aiChoices = allRooms.filter(r => r !== startLoc);
-      const aiStart = aiChoices[Math.floor(setupRng() * aiChoices.length)] || 'LIBRARY';
-      localStorage.setItem('aiLoc_' + seed, aiStart);
     }
 
-    const aiStartLoc = localStorage.getItem('aiLoc_' + seed) || 'LIBRARY';
+    let aiStartLoc = localStorage.getItem('aiLoc_' + seed);
+    if (!aiStartLoc || invalidStarts.includes(aiStartLoc) || aiStartLoc === startLoc) {
+      const aiChoices = validStarts.filter(r => r !== startLoc);
+      aiStartLoc = aiChoices[Math.floor(setupRng() * aiChoices.length)] || (startLoc === 'LIBRARY' ? 'LOUNGE' : 'LIBRARY');
+      localStorage.setItem('aiLoc_' + seed, aiStartLoc);
+    }
 
     // Confidential Case File (Crisp Light Theme Styling for 1930s Detective Dossier)
     const setupHtml = `
@@ -1454,9 +1584,17 @@ export default function App() {
     localStorage.removeItem('keyFound_' + code);
     localStorage.removeItem('keyFoundRoom_' + code);
     localStorage.removeItem('chamberPasscode_' + code);
+    localStorage.removeItem('hasTorchlight_' + code);
+    localStorage.removeItem('hasLadder_' + code);
+    localStorage.removeItem('hasPoliceTape_' + code);
+    localStorage.removeItem('hasSabotageTrap_' + code);
 
     setActiveSeed(code);
     setIsRoomUnlocked(false);
+    setHasTorchlight(false);
+    setHasLadder(false);
+    setHasPoliceTape(false);
+    setHasSabotageTrap(false);
     setSearchedItemRooms([]);
     setTokens(initialTokens);
     setApSpent(0);
@@ -1645,6 +1783,20 @@ export default function App() {
       return;
     }
 
+    if (moveDropdownVal === 'CELLAR' && !hasTorchlight) {
+      showAlert(
+        `<strong>🔦 PITCH-BLACK CELLAR:</strong><br><br>The cellar stairs descend into total, suffocating darkness. You cannot enter the <strong>CELLAR</strong> without a <strong>Torchlight</strong>!<br><br>Scan room QR codes across the mansion to locate a Torchlight.`
+      );
+      return;
+    }
+
+    if (moveDropdownVal === 'ATTIC' && !hasLadder) {
+      showAlert(
+        `<strong>🪜 LOFT TRAPDOOR UNREACHABLE:</strong><br><br>The trapdoor to the attic ceiling is fixed high out of reach. You need a <strong>Ladder</strong> to climb up into the <strong>ATTIC</strong>!<br><br>Scan room QR codes across the mansion to locate a Ladder.`
+      );
+      return;
+    }
+
     const alfredLoc = aiStats.loc || localStorage.getItem('aiLoc_' + activeSeed);
     if (moveDropdownVal === alfredLoc) {
       showAlert(
@@ -1708,21 +1860,17 @@ export default function App() {
       localStorage.setItem('myStartLoc_' + activeSeed, targetRoom);
       setMoveDropdownVal('');
 
-      const newScore = playerScore + 50;
-      setPlayerScore(newScore);
-      localStorage.setItem('score_' + activeSeed, newScore.toString());
-      localStorage.setItem('playerScore_' + activeSeed, newScore.toString());
-
+      // No merit score added for entering chamber
       const isAdjacent = moveCost === 1;
       const distanceDesc = isAdjacent ? 'Adjacent Chamber' : 'Distant Manor Chamber';
 
       saveLog(
-        `🔓 Entered correct 4-digit passcode [${cleanPin}] for the ${targetRoom}! Disengaged deadbolt and entered (+50 Merit Points, -${moveCost} AP • ${distanceDesc}).`
+        `🔓 Entered correct 4-digit passcode [${cleanPin}] for the ${targetRoom}! Disengaged deadbolt and entered (-${moveCost} AP • ${distanceDesc}).`
       );
 
       setModalPasscodePrompt({ open: false, targetRoom: '', enteredCode: '', error: '' });
       showAlert(
-        `<strong>🎉 PASSCODE ACCEPTED!</strong><br><br>The heavy tumbler deadbolt on the <strong>${targetRoom}</strong> clicks open! The heavy oak door swings wide.<br><br>You stepped into the <strong>${targetRoom}</strong>! (+50 Merit Points, -${moveCost} AP • ${distanceDesc})`
+        `<strong>🎉 PASSCODE ACCEPTED!</strong><br><br>The heavy tumbler deadbolt on the <strong>${targetRoom}</strong> clicks open! The heavy oak door swings wide.<br><br>You stepped into the <strong>${targetRoom}</strong>! (-${moveCost} AP • ${distanceDesc})`
       );
     } else {
       setModalPasscodePrompt(prev => ({
@@ -1732,104 +1880,155 @@ export default function App() {
     }
   };
 
-  // --- SEARCH ROOM FOR ITEM TOKEN ---
-  const handleSearchItemToken = (room: string, isFromToss = false) => {
-    const itemAssignments: Record<string, string> = JSON.parse(
-      localStorage.getItem('itemAssignments_' + activeSeed) || '{}'
-    );
-    const foundItem = itemAssignments[room];
-    if (!foundItem) {
-      if (!isFromToss) {
-        showAlert(`There is no physical Item Token placed in the <strong>${room}</strong>.`);
-      }
-      return;
-    }
-    if (searchedItemRooms.includes(room)) {
-      if (!isFromToss) {
-        showAlert(`The Item Token in the <strong>${room}</strong> has already been collected.`);
-      }
+  // --- SCAN LOCATION QR CODE & RANDOM ITEM DISCOVERY ---
+  const handleScanLocation = (roomTarget?: string, rawCode?: string) => {
+    const targetRoom = roomTarget || playerLocation;
+
+    const remainingAP = Math.max(0, 8 + freeAP - apSpent);
+    if (remainingAP < 1 && localStorage.getItem('isDevMode') !== 'true') {
+      showAlert(
+        '<strong>INSUFFICIENT ACTION POINTS:</strong><br><br>Scanning and searching a location requires <strong>1 AP ⚡</strong>, but you have 0 AP remaining this round.'
+      );
       return;
     }
 
-    if (!isFromToss) {
-      spendAP(1);
+    if (searchedItemRooms.includes(targetRoom)) {
+      showAlert(
+        `The <strong>${targetRoom}</strong> has already been thoroughly searched for items. No further items found here.`
+      );
+      return;
     }
 
-    const updatedSearched = [...searchedItemRooms, room];
+    spendAP(1);
+
+    const updatedSearched = [...searchedItemRooms, targetRoom];
     setSearchedItemRooms(updatedSearched);
     localStorage.setItem('searchedItemRooms_' + activeSeed, JSON.stringify(updatedSearched));
 
     const lockedChamber = localStorage.getItem('lockedRoom_' + activeSeed) || 'CELLAR';
+    const keyAlreadyFound = localStorage.getItem('keyFound_' + activeSeed) === 'true';
 
-    if (foundItem === 'Key') {
+    // Prioritize essential missing traversal items so player can enter Cellar, Attic, locked room
+    const missingEssentials: string[] = [];
+    if (!hasTorchlight) missingEssentials.push('Torchlight');
+    if (!hasLadder) missingEssentials.push('Ladder');
+    if (!keyAlreadyFound) missingEssentials.push('Key');
+
+    let chosenItem = '';
+    if (missingEssentials.length > 0 && Math.random() < 0.8) {
+      chosenItem = missingEssentials[Math.floor(Math.random() * missingEssentials.length)];
+    } else {
+      const generalPool = [
+        'Police Tape',
+        'Sabotage Trap',
+        'Adrenaline Syringe',
+        'Magnifying Glass',
+        'Blackmail Ledger',
+        'Old Blueprint',
+      ];
+      if (!hasTorchlight) generalPool.push('Torchlight');
+      if (!hasLadder) generalPool.push('Ladder');
+      if (!keyAlreadyFound) generalPool.push('Key');
+      chosenItem = generalPool[Math.floor(Math.random() * generalPool.length)];
+    }
+
+    if (chosenItem === 'Key') {
       const pin = getChamberPasscode(activeSeed || '');
       localStorage.setItem('keyFound_' + activeSeed, 'true');
-      localStorage.setItem('keyFoundRoom_' + activeSeed, room);
-
-      const newScore = playerScore + 40;
-      setPlayerScore(newScore);
-      localStorage.setItem('score_' + activeSeed, newScore.toString());
-      localStorage.setItem('playerScore_' + activeSeed, newScore.toString());
-
+      localStorage.setItem('keyFoundRoom_' + activeSeed, targetRoom);
       saveLog(
-        `🔑 MANSION KEY DISCOVERED in [${room}]! Engraved 4-Digit Passcode: [${pin}] to unlock the ${lockedChamber} (+40 Merit Points).`
+        `🔑 MANSION KEY DISCOVERED in [${targetRoom}] via QR Scanner! Engraved 4-Digit Passcode: [${pin}] to unlock the ${lockedChamber}.`
       );
 
       setModalFoundKey({
         open: true,
-        room,
+        room: targetRoom,
         lockedRoom: lockedChamber,
         passcode: pin,
       });
+      return;
+    }
+
+    let extraEffectDesc = '';
+    if (chosenItem === 'Torchlight') {
+      setHasTorchlight(true);
+      localStorage.setItem('hasTorchlight_' + activeSeed, 'true');
+      extraEffectDesc =
+        '🔦 <strong>Torchlight Acquired!</strong> You can now safely enter and explore the pitch-black <strong>CELLAR</strong>.';
+    } else if (chosenItem === 'Ladder') {
+      setHasLadder(true);
+      localStorage.setItem('hasLadder_' + activeSeed, 'true');
+      extraEffectDesc =
+        '🪜 <strong>Ladder Acquired!</strong> You can now climb the trapdoor to access and explore the <strong>ATTIC</strong>.';
+    } else if (chosenItem === 'Police Tape') {
+      setHasPoliceTape(true);
+      localStorage.setItem('hasPoliceTape_' + activeSeed, 'true');
+      extraEffectDesc =
+        '🛡️ <strong>Police Tape Acquired!</strong> Deploy it in any room to seal the doorway and block Detective Alfred.';
+    } else if (chosenItem === 'Sabotage Trap') {
+      setHasSabotageTrap(true);
+      localStorage.setItem('hasSabotageTrap_' + activeSeed, 'true');
+      extraEffectDesc =
+        '⚠️ <strong>Sabotage Trap Acquired!</strong> Conceal a spring-loaded snare to stop Detective Alfred when he enters.';
+    } else if (chosenItem === 'Adrenaline Syringe') {
+      setFreeAP(prev => prev + 2);
+      extraEffectDesc =
+        '⚡ <strong>Adrenaline Syringe Used!</strong> Department stimulant injected. Restored <strong>+2 Action Points</strong> immediately.';
+    } else if (chosenItem === 'Magnifying Glass') {
+      const kEnt = gameDataRef.current.solution?.entities.find(e => e.id === 'K');
+      const kSuspect = gameDataRef.current.suspects.find(s => s.name === kEnt?.name);
+      const traitHint = kSuspect?.rawTraits?.[0]?.formatted || 'wearing distinctive attire';
+      extraEffectDesc = `🔎 <strong>Magnifying Glass Clue:</strong> Crime scene residue indicates the killer was seen <em>${traitHint}</em>.`;
+    } else if (chosenItem === 'Blackmail Ledger') {
+      extraEffectDesc =
+        '📖 <strong>Blackmail Ledger Recovered:</strong> Confidential financial notes regarding Dr. Black\'s guests recorded in your case notes.';
     } else {
-      let bonusPts = 15;
-      let extraEffectDesc = '';
+      extraEffectDesc =
+        '🗺️ <strong>Manor Blueprint Recovered:</strong> Detailed floorplan passages added to your case notes.';
+    }
 
-      if (foundItem === 'Police Tape') {
-        setHasPoliceTape(true);
-        localStorage.setItem('hasPoliceTape_' + activeSeed, 'true');
-        extraEffectDesc = 'Added <strong>Police Tape</strong> to your gear. You can now seal any room to block Detective Alfred!';
-      } else if (foundItem === 'Sabotage Trap') {
-        setHasSabotageTrap(true);
-        localStorage.setItem('hasSabotageTrap_' + activeSeed, 'true');
-        extraEffectDesc = 'Added <strong>Sabotage Trap</strong> to your gear. Deploy it to snare Detective Alfred for 2 AP!';
-      } else if (foundItem === 'Ambushed in the Dark') {
-        spendAP(1);
-        extraEffectDesc = 'A shadowy figure lunged from the dark! You defended yourself, losing 1 additional AP.';
-      } else if (foundItem === 'Smear Campaign') {
-        const rep = Math.max(0, playerRep - 1);
-        setPlayerRep(rep);
-        localStorage.setItem('playerRep_' + activeSeed, rep.toString());
-        extraEffectDesc = 'A slanderous dossier was planted here against your investigation (-1 Reputation).';
-      } else if (
-        foundItem === 'Blackmail Ledger' ||
-        foundItem === 'Adrenaline Syringe' ||
-        foundItem === 'Stethoscope' ||
-        foundItem === 'Secret Door Blueprint'
-      ) {
-        bonusPts = 25;
-        extraEffectDesc = `Discovered valuable classified item: <strong>${foundItem}</strong>! (+25 Merit Points)`;
-      } else {
-        extraEffectDesc = `Recovered physical utility item: <strong>${foundItem}</strong>. (+15 Merit Points)`;
-      }
+    saveLog(`Searched [${targetRoom}] via QR Scanner: Uncovered [${chosenItem}].`);
 
-      const newScore = playerScore + bonusPts;
-      setPlayerScore(newScore);
-      localStorage.setItem('score_' + activeSeed, newScore.toString());
-      localStorage.setItem('playerScore_' + activeSeed, newScore.toString());
+    showAlert(
+      `<strong>🔍 ITEM UNCOVERED:</strong><br><br>
+       Scanning the location QR code in the <strong>${targetRoom}</strong>, you uncovered:<br><br>
+       <div style="font-size:1.15rem; font-weight:bold; color:var(--gold); text-align:center; padding:10px; background:#f5eedf; border:1px solid #8b6e2d; border-radius:6px; margin-bottom:12px;">
+         ${chosenItem}
+       </div>
+       <div style="font-size:0.95rem; line-height:1.45; color:#1c1917;">
+         ${extraEffectDesc}
+       </div>`
+    );
+  };
 
-      saveLog(`Searched Item Token in [${room}]: Uncovered [${foundItem}] (+${bonusPts} Merit Points).`);
+  const handleProcessScannedCode = (rawCode: string) => {
+    const code = rawCode.trim();
+    if (!code) return;
 
-      if (!isFromToss) {
-        showAlert(
-          `<strong>🔍 ITEM TOKEN RECOVERED:</strong><br><br>
-           Searching the <strong>${room}</strong>, you turned over the room's token and revealed:<br><br>
-           <div style="font-size:1.15rem; font-weight:bold; color:var(--gold); text-align:center; padding:8px; background:#f5eedf; border:1px solid #8b6e2d; border-radius:6px; margin-bottom:10px;">
-             ${foundItem}
-           </div>
-           ${extraEffectDesc}`
-        );
-      }
+    const correctPin = getChamberPasscode(activeSeed || '');
+    const lockedChamber = localStorage.getItem('lockedRoom_' + activeSeed) || 'CELLAR';
+
+    if (code === correctPin) {
+      setModalScanner(false);
+      setModalPasscodePrompt({
+        open: true,
+        targetRoom: lockedChamber,
+        enteredCode: code,
+        error: '',
+      });
+      return;
+    }
+
+    const matchedRoom = allMansionRooms.find(
+      r => code.toUpperCase() === r || code.toUpperCase().includes(r) || r.includes(code.toUpperCase())
+    );
+
+    setModalScanner(false);
+
+    if (matchedRoom) {
+      handleScanLocation(matchedRoom, code);
+    } else {
+      handleScanLocation(playerLocation, code);
     }
   };
 
@@ -1850,38 +2049,24 @@ export default function App() {
         localStorage.setItem('playerRep_' + activeSeed, newRep.toString());
         localStorage.setItem('tossedRoom_' + activeSeed + '_' + r, 'true');
 
-        // Check if room has an unsearched Item Token
-        const itemAssignments: Record<string, string> = JSON.parse(
-          localStorage.getItem('itemAssignments_' + activeSeed) || '{}'
-        );
-        if (itemAssignments[r] && !searchedItemRooms.includes(r)) {
-          handleSearchItemToken(r, true);
+        if (!searchedItemRooms.includes(r)) {
+          handleScanLocation(r);
         }
 
         const occ = gameDataRef.current.solution?.entities.find(e => e.loop[e.startIndex] === r);
         let msg = '';
-        let pointsEarned = 15;
         if (occ && (occ.id === 'K' || occ.id === 'A')) {
-          pointsEarned = 100;
-          msg = `You caught <strong style="color:var(--gold); font-size:1.2rem;">${occ.name}</strong> hiding in the ${r}! They are officially a prime suspect. (+100 Merit Points)`;
+          msg = `You caught <strong style="color:var(--gold); font-size:1.2rem;">${occ.name}</strong> hiding in the ${r}! They are officially a prime suspect.`;
         } else if (occ && occ.id.startsWith('W')) {
-          pointsEarned = 120;
-          msg = `You uncovered a weapon: <strong style="color:var(--accent); font-size:1.2rem;">${occ.name}</strong> carefully stashed behind the furniture. (+120 Merit Points)`;
+          msg = `You uncovered a weapon: <strong style="color:var(--accent); font-size:1.2rem;">${occ.name}</strong> carefully stashed behind the furniture.`;
         } else if (occ && occ.id === 'I' && occ.name !== 'Nobody') {
-          pointsEarned = 40;
-          msg = `You searched the room and found guest <strong style="color:var(--gold);">${occ.name}</strong> trembling in a corner. (+40 Merit Points)`;
+          msg = `You searched the room and found guest <strong style="color:var(--gold);">${occ.name}</strong> trembling in a corner.`;
         } else {
-          pointsEarned = 15;
-          msg = `You tore the ${r} apart from top to bottom. Nothing suspicious was found. (+15 Thoroughness Points)`;
+          msg = `You tore the ${r} apart from top to bottom. Nothing suspicious was found.`;
         }
 
-        const newPlayerScore = playerScore + pointsEarned;
-        setPlayerScore(newPlayerScore);
-        localStorage.setItem('score_' + activeSeed, newPlayerScore.toString());
-        localStorage.setItem('playerScore_' + activeSeed, newPlayerScore.toString());
-
-        saveLog(`Tossed [${r}] (-4 AP, -1 Reputation, +${pointsEarned} Pts): ${msg.replace(/<[^>]+>/g, '')}`);
-        showAlert(`<span style="color:var(--gold); font-weight:bold;">SEARCH COMPLETE (-1 REPUTATION, +${pointsEarned} PTS)</span><br><br>${msg}`);
+        saveLog(`Tossed [${r}] (-4 AP, -1 Reputation): ${msg.replace(/<[^>]+>/g, '')}`);
+        showAlert(`<span style="color:var(--gold); font-weight:bold;">SEARCH COMPLETE (-1 REPUTATION)</span><br><br>${msg}`);
       }
     );
   };
@@ -1895,27 +2080,16 @@ export default function App() {
       console.warn('Sync unlock failed:', e)
     );
 
-    const newScore = playerScore + 40;
-    setPlayerScore(newScore);
-    localStorage.setItem('score_' + activeSeed, newScore.toString());
-    localStorage.setItem('playerScore_' + activeSeed, newScore.toString());
-
-    saveLog(`🔓 Key Card Verified: Unlocked the ${lockedChamber} with scanner (+40 Merit Points).`);
+    saveLog(`🔓 Key Card Verified: Unlocked the ${lockedChamber} with scanner.`);
     setModalScanner(false);
     showAlert(
-      `<strong>🎉 KEY CARD VERIFIED!</strong><br><br>The electromagnetic deadbolt on the <strong>${lockedChamber}</strong> clicked and retracted! (+40 Merit Points)<br><br>All investigators now have full legal clearance to enter and search the ${lockedChamber}.`
+      `<strong>🎉 KEY CARD VERIFIED!</strong><br><br>The electromagnetic deadbolt on the <strong>${lockedChamber}</strong> clicked and retracted!<br><br>All investigators now have full legal clearance to enter and search the ${lockedChamber}.`
     );
   };
 
   const handleScanGenericToken = () => {
     setModalScanner(false);
-    spendAP(1);
-    const newScore = playerScore + 15;
-    setPlayerScore(newScore);
-    localStorage.setItem('score_' + activeSeed, newScore.toString());
-    localStorage.setItem('playerScore_' + activeSeed, newScore.toString());
-    saveLog(`Scanned token in [${playerLocation}] (-1 AP, +15 Thoroughness Points).`);
-    showAlert(`Scanned token in <strong>${playerLocation}</strong>: Room verified clear of traps. (+15 Merit Points)`);
+    handleScanLocation(playerLocation, 'GENERIC_TOKEN');
   };
 
   // --- TACTICAL GEAR DEPLOYMENT ---
@@ -2385,8 +2559,12 @@ export default function App() {
     executeAlfredTurn(nextRound);
   };
 
-  // --- ALFRED MOVES FIRST AT START OF EACH ROUND ---
+  // --- ALFRED MOVES FIRST AT START OF EACH ROUND (ONLY FROM ROUND 2 ONWARDS) ---
   const executeAlfredTurn = (roundNum: number) => {
+    if (roundNum <= 1) {
+      // In round 1, AI remains at their initial starting location
+      return;
+    }
     const currentDiff = (localStorage.getItem('activeDifficulty_' + activeSeed) || newGameDifficulty || 'normal').toLowerCase();
     const isBeginner = currentDiff === 'beginner' || currentDiff === 'rookie';
     const isExpert = currentDiff === 'expert' || currentDiff === 'hard';
@@ -3066,6 +3244,44 @@ export default function App() {
             {/* PANE: MOVE */}
             {activePhase === 'MOVE' && (
               <div id="pane-move" className="flex flex-col gap-3">
+                {/* Equipment & Key Traversal Gear */}
+                <div className="bg-[#faf6ee] border border-[#8b6e2d]/40 rounded-lg p-2.5 mb-0 text-xs flex flex-wrap items-center justify-between gap-1.5 shadow-xs">
+                  <div className="font-serif font-bold text-stone-800 flex items-center gap-1.5 text-[11px] uppercase tracking-wider">
+                    <span>🎒 Traversal Gear:</span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px]">
+                    <span
+                      className={`px-2 py-0.5 rounded border flex items-center gap-1 font-bold ${
+                        hasTorchlight
+                          ? 'bg-amber-100 text-amber-900 border-amber-400'
+                          : 'bg-stone-100 text-stone-400 border-stone-200'
+                      }`}
+                    >
+                      🔦 Torchlight {hasTorchlight ? '✓ (Cellar)' : '✗ (Cellar)'}
+                    </span>
+                    <span
+                      className={`px-2 py-0.5 rounded border flex items-center gap-1 font-bold ${
+                        hasLadder
+                          ? 'bg-amber-100 text-amber-900 border-amber-400'
+                          : 'bg-stone-100 text-stone-400 border-stone-200'
+                      }`}
+                    >
+                      🪜 Ladder {hasLadder ? '✓ (Attic)' : '✗ (Attic)'}
+                    </span>
+                    <span
+                      className={`px-2 py-0.5 rounded border flex items-center gap-1 font-bold ${
+                        isRoomUnlocked
+                          ? 'bg-emerald-100 text-emerald-900 border-emerald-400'
+                          : localStorage.getItem('keyFound_' + activeSeed) === 'true'
+                          ? 'bg-blue-100 text-blue-900 border-blue-400'
+                          : 'bg-stone-100 text-stone-400 border-stone-200'
+                      }`}
+                    >
+                      🔑 {isRoomUnlocked ? 'Chamber Open' : localStorage.getItem('keyFound_' + activeSeed) === 'true' ? `Passcode: ${getChamberPasscode(activeSeed || '')}` : 'Key Needed'}
+                    </span>
+                  </div>
+                </div>
+
                 <div className="bg-[#fdfbf7] border border-[#8b6e2d]/60 rounded-lg p-3.5 shadow-xs text-left">
                   <div className="flex items-center justify-between mb-1.5">
                     <label className="text-xs font-bold text-[#8b6e2d] uppercase flex items-center gap-1.5 font-serif">
@@ -3087,6 +3303,15 @@ export default function App() {
                       const isAlfredRoom = room === (aiStats.loc || localStorage.getItem('aiLoc_' + activeSeed));
                       const lockedChamber = localStorage.getItem('lockedRoom_' + activeSeed);
                       const isLockedRoom = room === lockedChamber && !isRoomUnlocked;
+                      const needsTorch = room === 'CELLAR' && !hasTorchlight;
+                      const needsLadder = room === 'ATTIC' && !hasLadder;
+
+                      let suffix = `${cost} AP ⚡`;
+                      if (isAlfredRoom) suffix = '⛔ Occupied by Alfred';
+                      else if (needsTorch) suffix = '🔦 Torchlight Required';
+                      else if (needsLadder) suffix = '🪜 Ladder Required';
+                      else if (isLockedRoom) suffix = '🔒 Passcode Required';
+
                       return (
                         <option
                           key={idx}
@@ -3095,12 +3320,12 @@ export default function App() {
                           className={
                             isAlfredRoom
                               ? 'text-red-700 bg-red-50'
-                              : isLockedRoom
+                              : isLockedRoom || needsTorch || needsLadder
                               ? 'text-amber-800 bg-amber-50 font-bold'
                               : 'text-stone-900'
                           }
                         >
-                          {isLockedRoom ? `🔒 ${room}` : room} — {isAlfredRoom ? '⛔ Occupied by Alfred' : `${cost} AP ⚡`}
+                          {isLockedRoom ? `🔒 ${room}` : room} — {suffix}
                         </option>
                       );
                     })}
@@ -3141,44 +3366,31 @@ export default function App() {
             {/* PANE: ACTION */}
             {activePhase === 'ACTION' && (
               <div id="pane-action" className="flex flex-col gap-2.5">
-                {/* 0. Search Room for Item Token */}
-                {(() => {
-                  const itemAssignments: Record<string, string> = JSON.parse(
-                    localStorage.getItem('itemAssignments_' + activeSeed) || '{}'
-                  );
-                  const hasTokenInRoom = Boolean(itemAssignments[playerLocation]);
-                  const isSearched = searchedItemRooms.includes(playerLocation);
-
-                  if (hasTokenInRoom && !isSearched) {
-                    return (
-                      <button
-                        className="w-full bg-[#fdfbf7] hover:bg-[#faf4e6] border-2 border-[#8b6e2d] text-stone-900 rounded-lg p-3.5 flex items-center justify-between shadow-md transition-all duration-200 cursor-pointer text-left group"
-                        onClick={() => handleSearchItemToken(playerLocation)}
-                      >
-                        <div className="flex items-center gap-3">
-                          <div className="w-10 h-10 rounded-full bg-[#faecd0] border border-[#8b6e2d] flex items-center justify-center text-[#8b0000] flex-shrink-0 group-hover:scale-105 transition-all">
-                            <KeyRound className="w-5 h-5 text-[#8b0000]" />
-                          </div>
-                          <div>
-                            <div className="font-serif font-bold text-base text-stone-900 leading-tight group-hover:text-[#8b0000] transition-colors flex items-center gap-2">
-                              <span>Search Room (Item Token)</span>
-                              <span className="text-[10px] bg-amber-100 text-amber-900 px-2 py-0.5 rounded font-mono uppercase font-bold border border-amber-300">
-                                Token Present
-                              </span>
-                            </div>
-                            <div className="text-xs text-stone-600 font-sans mt-0.5">
-                              Examine this chamber and collect the physical board item token
-                            </div>
-                          </div>
-                        </div>
-                        <div className="text-[11px] font-bold font-mono px-2.5 py-1 rounded bg-[#f5eedf] text-[#8b6e2d] border border-[#8b6e2d]/60 flex-shrink-0">
-                          1 AP ⚡
-                        </div>
-                      </button>
-                    );
-                  }
-                  return null;
-                })()}
+                {/* 0. Scan Location QR Code (Search Room) */}
+                <button
+                  className="w-full bg-[#fdfbf7] hover:bg-[#faf4e6] active:bg-[#f5eedf] border-2 border-[#8b6e2d] text-stone-900 rounded-lg p-3.5 flex items-center justify-between shadow-md transition-all duration-200 cursor-pointer text-left group"
+                  onClick={() => setModalScanner(true)}
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-full bg-[#faecd0] border border-[#8b6e2d] flex items-center justify-center text-[#8b0000] flex-shrink-0 group-hover:scale-105 transition-all">
+                      <Camera className="w-5 h-5 text-[#8b0000]" />
+                    </div>
+                    <div>
+                      <div className="font-serif font-bold text-base text-stone-900 leading-tight group-hover:text-[#8b0000] transition-colors flex items-center gap-2">
+                        <span>Scan Location QR Code</span>
+                        <span className="text-[10px] bg-amber-100 text-amber-900 px-2 py-0.5 rounded font-mono uppercase font-bold border border-amber-300">
+                          {searchedItemRooms.includes(playerLocation) ? 'Searched' : 'Unsearched'}
+                        </span>
+                      </div>
+                      <div className="text-xs text-stone-600 font-sans mt-0.5">
+                        Scan physical QR code to search the {playerLocation} for items & gear
+                      </div>
+                    </div>
+                  </div>
+                  <div className="text-[11px] font-bold font-mono px-2.5 py-1 rounded bg-[#f5eedf] text-[#8b6e2d] border border-[#8b6e2d]/60 flex-shrink-0">
+                    1 AP ⚡
+                  </div>
+                </button>
 
                 {/* 1. Canvass Area */}
                 <button
@@ -4179,12 +4391,19 @@ export default function App() {
       {modalScanner && (
         <div className="modal-bg !flex">
           <div className="bg-[#fdfbf7] p-5 border-2 border-[#8b6e2d] rounded-xl text-center max-w-sm w-full shadow-2xl relative">
+            <span
+              onClick={() => setModalScanner(false)}
+              className="absolute top-3 right-4 text-2xl text-stone-400 hover:text-red-700 font-bold cursor-pointer"
+            >
+              ✕
+            </span>
+
             <h2 className="font-serif text-xl font-bold text-stone-900 mb-1 flex items-center justify-center gap-2">
               <Camera className="w-5 h-5 text-[#8b6e2d]" />
-              <span>Token & Chamber Scanner</span>
+              <span>Location & Evidence Scanner</span>
             </h2>
             <p className="text-xs text-stone-600 mb-3 font-serif">
-              Inspect physical board evidence tokens or enter tumbler access passcodes.
+              Point camera at physical room QR codes or enter tumbler passcodes.
             </p>
 
             {/* Chamber Lock Status Card */}
@@ -4194,7 +4413,7 @@ export default function App() {
               const keyRoom = localStorage.getItem('keyFoundRoom_' + activeSeed);
               return (
                 <div
-                  className={`p-3 rounded-lg border text-left mb-4 shadow-xs ${
+                  className={`p-3 rounded-lg border text-left mb-3 shadow-xs ${
                     isRoomUnlocked
                       ? 'bg-emerald-50 border-emerald-300 text-emerald-950'
                       : 'bg-amber-50/90 border-[#8b6e2d]/60 text-stone-900'
@@ -4223,24 +4442,64 @@ export default function App() {
                       ? `The deadbolt on the ${lockedChamber} is disengaged. Investigators have clearance to enter.`
                       : keyFound
                       ? `The Key was recovered in the ${keyRoom}! Enter the 4-digit passcode to disengage the deadbolt.`
-                      : `The ${lockedChamber} is secured by a 4-digit deadbolt! Search rooms containing Item Tokens across the mansion to find the Key.`}
+                      : `The ${lockedChamber} is secured by a 4-digit deadbolt! Scan room QR codes across the mansion to locate the Key.`}
                   </p>
                 </div>
               );
             })()}
 
-            {/* Camera Viewfinder / Simulation Box */}
-            <div id="reader" className="w-full mb-3 bg-stone-900/90 border border-[#8b6e2d]/40 rounded-lg min-h-[120px] flex flex-col items-center justify-center p-3 text-stone-300 relative overflow-hidden shadow-inner">
-              <div className="w-12 h-12 border-2 border-dashed border-[#d4af37]/60 rounded-lg flex items-center justify-center mb-2 animate-pulse">
-                <Search className="w-6 h-6 text-[#d4af37]" />
-              </div>
-              <span className="text-xs font-mono font-bold text-stone-300 tracking-wide">
-                SCOTLAND YARD OPTICAL SCANNER
-              </span>
-              <span className="text-[10px] text-stone-400 mt-0.5">
-                Target evidence token or enter tumbler passcode
-              </span>
+            {/* Camera Viewfinder Box (Html5Qrcode attaches directly to empty #reader) */}
+            <div className="w-full mb-3 bg-stone-900 border border-[#8b6e2d]/50 rounded-lg min-h-[220px] overflow-hidden relative shadow-inner flex flex-col items-center justify-center">
+              {/* Isolated reader node with no React children */}
+              <div id="reader" className="w-full h-full min-h-[220px]" />
+
+              {!isCameraActive && !cameraError && (
+                <div className="absolute inset-0 bg-stone-900/90 flex flex-col items-center justify-center p-4 pointer-events-none z-10">
+                  <div className="w-10 h-10 border-2 border-dashed border-[#d4af37] rounded-lg flex items-center justify-center mb-2 animate-spin">
+                    <Camera className="w-5 h-5 text-[#d4af37]" />
+                  </div>
+                  <span className="text-xs font-mono font-bold text-stone-300 tracking-wide">
+                    INITIALIZING CAMERA...
+                  </span>
+                  <span className="text-[10px] text-stone-400 mt-1">
+                    Opening optical stream for QR codes
+                  </span>
+                </div>
+              )}
+
+              {cameraError && (
+                <div className="absolute inset-0 bg-stone-900/95 flex flex-col items-center justify-center p-3 text-center z-10">
+                  <AlertTriangle className="w-6 h-6 text-amber-500 mx-auto mb-1.5" />
+                  <div className="text-xs font-bold text-amber-300 mb-1">Camera Stream Inactive</div>
+                  <p className="text-[11px] text-stone-300 mb-2 leading-tight">
+                    {cameraError}
+                  </p>
+                  <button
+                    type="button"
+                    className="btn btn-gold !my-0 !py-1.5 !px-3 text-xs uppercase font-bold cursor-pointer"
+                    onClick={() => {
+                      setModalScanner(false);
+                      handleScanLocation(playerLocation);
+                    }}
+                  >
+                    🔎 Search {playerLocation} QR
+                  </button>
+                </div>
+              )}
             </div>
+
+            {/* Quick Action: Search current room via scanner */}
+            <button
+              type="button"
+              className="w-full bg-[#faecd0] hover:bg-[#f5eedf] text-[#8b0000] border border-[#8b6e2d] rounded-lg py-2.5 px-3 mb-3 text-xs font-serif font-bold flex items-center justify-center gap-2 cursor-pointer shadow-xs transition-colors"
+              onClick={() => {
+                setModalScanner(false);
+                handleScanLocation(playerLocation);
+              }}
+            >
+              <Search className="w-4 h-4 text-[#8b0000]" />
+              <span>Search {playerLocation} Location QR (1 AP ⚡)</span>
+            </button>
 
             {/* Manual Token Scan input */}
             <div className="mb-3 text-left">
@@ -4253,26 +4512,12 @@ export default function App() {
                 autoCorrect="off"
                 autoCapitalize="off"
                 spellCheck="false"
-                placeholder="e.g. 4-Digit PIN or TOKEN"
+                placeholder="e.g. 4-Digit PIN or Room Name"
                 className="w-full bg-white border border-[#8b6e2d]/70 text-stone-900 rounded px-2.5 py-1.5 text-xs uppercase font-mono font-bold focus:outline-hidden focus:ring-1 focus:ring-[#8b6e2d]"
                 onKeyDown={e => {
                   if (e.key === 'Enter') {
                     const val = (e.target as HTMLInputElement).value.trim();
-                    const correctPin = getChamberPasscode(activeSeed || '');
-                    if (val === correctPin) {
-                      setModalScanner(false);
-                      setModalPasscodePrompt({
-                        open: true,
-                        targetRoom: localStorage.getItem('lockedRoom_' + activeSeed) || 'CELLAR',
-                        enteredCode: val,
-                        error: '',
-                      });
-                    } else if (val.toUpperCase().includes('KEY') || val.toUpperCase().includes('TOKEN')) {
-                      setModalScanner(false);
-                      handleSearchItemToken(playerLocation);
-                    } else {
-                      handleScanGenericToken();
-                    }
+                    handleProcessScannedCode(val);
                   }
                 }}
               />
@@ -4298,16 +4543,6 @@ export default function App() {
               )}
               <button
                 className="btn bg-[#faf6ee] hover:bg-[#f2e9d7] text-stone-800 border border-[#8b6e2d]/60 !my-0 !py-2 text-xs uppercase tracking-wider font-bold flex items-center justify-center gap-1.5 cursor-pointer"
-                onClick={() => {
-                  setModalScanner(false);
-                  handleSearchItemToken(playerLocation);
-                }}
-              >
-                <Search className="w-3.5 h-3.5 text-[#8b6e2d]" />
-                <span>⚡ Search / Scan Current Room Token</span>
-              </button>
-              <button
-                className="btn btn-secondary !my-0 !py-2 text-xs font-serif text-stone-600 cursor-pointer"
                 onClick={() => setModalScanner(false)}
               >
                 Close Scanner
@@ -5527,9 +5762,6 @@ export default function App() {
             <span
               onClick={() => {
                 setModalCaseBriefing({ open: false, content: '' });
-                if (round === 1) {
-                  executeAlfredTurn(1);
-                }
               }}
               className="absolute top-4 right-5 text-2xl text-stone-400 hover:text-red-700 font-bold cursor-pointer"
             >
@@ -5543,9 +5775,6 @@ export default function App() {
               className="btn btn-gold !mt-4 !py-3 text-base flex-shrink-0 uppercase font-bold tracking-wider cursor-pointer shadow-md"
               onClick={() => {
                 setModalCaseBriefing({ open: false, content: '' });
-                if (round === 1) {
-                  executeAlfredTurn(1);
-                }
               }}
             >
               Close & Begin Investigation ➔
